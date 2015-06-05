@@ -2,6 +2,7 @@
 
 OUTPUT=""
 FORCE=""
+SUDO=""
 SIZE="6G"
 FSTYPE="ext4"
 FSOPTS="-F"
@@ -13,31 +14,37 @@ VGA="intel"
 IMG_USER="faironnier"
 IMG_USER_GROUPS="wheel,audio,video,users,storage"
 
-BASE_PACKAGES="base grub os-prober gparted sudo openssh ntfs-3g dosfstools"
+BASE_PACKAGES="base grub os-prober gparted openssh ntfs-3g dosfstools"
 
 DE="xfce4"
 DE_PACKAGES=""
 
 DM="lightdm"
 DM_PACKAGES=""
+DM_SERVICE=""
+
+AUTOLOGIN=""
 
 function usage() {
-	cat <<- EOF >&2
-		Usage $0: [OPTIONS] ([-o OUTPUT] | OUTPUT)
-		
-			OUTPUT: fichier image
-			-s    : taille de l\'image (défaut : 6G)
-			-f    : force l\'écrasement d\'une image existante
-			-t    : type de la partition (défaut : ext4)
-			-O    : option du formatage (défaut : \"-F\")
-			-n    : nom de la machine
-			-x    : désactive l\'environnement bureautique
-			-d    : spécifie l\'environnement bureautique (défaut : xfce4)
-			-c    : spécifie le gestionnaire de connexion (défaut : lightdm)
-		EOF
+	cat <<EOF >&2
+Usage $0: [OPTIONS] ([-o OUTPUT] | OUTPUT)
+
+	OUTPUT: fichier image
+	-s    : taille de l\'image (défaut : 6G)
+	-f    : force l\'écrasement d\'une image existante
+	-A    : architecture (i686|x86-64)
+	-t    : type de la partition (défaut : ext4)
+	-O    : option du formatage (défaut : \"-F\")
+	-n    : nom de la machine
+	-x    : désactive l\'environnement bureautique
+	-d    : spécifie l\'environnement bureautique (défaut : xfce4)
+	-c    : spécifie le gestionnaire de connexion (défaut : lightdm)
+	-S    : active sudo pour l\'utilisateur
+	-a    : active l\'autologin
+EOF
 }
 
-while getopts fo:s:t:O:d:c:x opt
+while getopts fo:s:t:O:d:c:xSaA opt
 do
 	case $opt in
 	f)	FORCE=1          ;;
@@ -49,6 +56,9 @@ do
 	d)  DE="$OPTARG"     ;;
 	c)  DM="$OPTARG"     ;;
 	x)  DE=""            ;;
+	S)  SUDO="oui"       ;;
+	a)  AUTOLOGIN="oui"  ;;
+	A)  ARCH="$OPTARG"   ;;
 	?)  usage
 		exit 1 ;;
 	:)	printf "Option -$OPTARG requires an argument.\n" >&2
@@ -64,14 +74,29 @@ then
 	X_PACKAGES=""
 else
 	case $DE in
-	xfce4) DE_PACKAGES="xfce4" ;;
+	xfce4)
+		DE_PACKAGES="xfce4"
+		;;
+	gnome)
+		DE_PACKAGES="gnome"
+		;;
+	enlightenment)
+		DE_PACKAGES="enlightenment"
+		;;
 	?)  echo "Environnement de bureau non géré $DE." >&2
 		exit 1
 		;;
 	esac
 	
 	case $DM in
-	lightdm) DM_PACKAGES="lightdm lightdm-gtk-greeter" ;;
+	lightdm)
+		DM_PACKAGES="lightdm lightdm-gtk-greeter"
+		DM_SERVICE="lightdm.service"
+		;;
+	gdm)
+		DM_PACKAGES="gdm"
+		DM_SERVICE="gdm"
+		;;
 	?)  echo "Gestionnaire de connexion non géré $DM." >&2
 		exit 1
 		;;
@@ -82,6 +107,11 @@ fi
 
 USER_PACKAGES="blender inkscape gimp openscad nmap gedit xz chromium"
 PACKAGES="$BASE_PACKAGES $X_PACKAGES $DE_PACKAGES $DM_PACKAGES $USER_PACKAGES"
+
+if [ -n "$SUDO" ]
+then
+	PACKAGES="$PACKAGES sudo"
+fi
 
 shift $(($OPTIND - 1))
 
@@ -114,6 +144,11 @@ then
 	fi
 fi
 
+if [ -n "$AUTOLOGIN" ]
+then
+	IMG_USER_GROUPS="$IMG_USER_GROUPS,autologin"
+fi
+
 BOOTSTRAP="archlinux-bootstrap-${VERSION}-${ARCH}.tar.gz"
 MOUNT_POINT="$OUTPUT-mount-point"
 
@@ -137,6 +172,8 @@ Packages          : $PACKAGES
 Nom de la machine : $NAME
 Utilisateur       : $IMG_USER
 Groupes           : $IMG_USER_GROUPS
+Sudo              : $SUDO
+Autologin         : $AUTOLOGIN
 EOF
 
 echo -n "On y va ? [On] "
@@ -180,8 +217,9 @@ function on_error() {
 	format)          delete_image ;;
 	mount)           delete_image ;;
 	bootstrap)       terminate && delete_image ;;
-	config)          terminate && delete_image ;;
+	pre_config)      terminate && delete_image ;;
 	packages)        terminate && delete_image ;;
+	post_config)     terminate && delete_image ;;
 	user)            terminate && delete_image ;;
 	custom_commands) terminate && delete_image ;;
 	esac
@@ -271,7 +309,7 @@ phase_bootstrap || on_error "bootstrap"
 # Copie des fichiers de configuration.
 #
 
-function phase_config() {
+function phase_pre_config() {
 	echo "[build] configure system"
 	if [ -z "$MOUNT_POINT" ]
 	then
@@ -291,12 +329,12 @@ function phase_config() {
 	sudo cp $CONFIG/pacman-mirrorlist  $MOUNT_POINT/etc/pacman.d/mirrorlist && \
 	sudo cp $CONFIG/vconsole.conf      $MOUNT_POINT/etc/                    && \
 	sudo cp $CONFIG/locale.gen         $MOUNT_POINT/etc/                    && \
-	sudo cp $CONFIG/sudoers            $MOUNT_POINT/etc/                    && \
-	sudo cp $CONFIG/locale.conf        $MOUNT_POINT/etc/                    && \
+	sudo cp $CONFIG/locale.conf        $MOUNT_POINT/etc/                    || return 1
+	
 	sudo echo $NAME > $MOUNT_POINT/etc/hostname
 }
 
-phase_config || on_error "config"
+phase_pre_config || on_error "pre_config"
 
 #
 # Installation des packages.
@@ -312,18 +350,62 @@ function phase_packages() {
 
 phase_packages || on_error "packages"
 
+#
+# Copie des fichiers de configuration.
+#
+
+function phase_post_config() {
+	echo "[build] configure system"
+	if [ -z "$MOUNT_POINT" ]
+	then
+		echo "Attention !!"
+		exit 1
+	fi
+	
+	if [ -d "$OUTPUT-config" ]
+	then
+		CONFIG="$OUTPUT-config"
+	else
+		CONFIG="config/"
+	fi
+	
+	if [ -n "$SUDO" ]
+	then
+		sudo cp $CONFIG/sudoers $MOUNT_POINT/etc/  && \
+	fi || return 1
+	
+	if [ -n "$DM" ]
+	then
+		archroot systemctl enable $DM.service
+	fi || return 1
+	
+	if [ -n "$AUTOLOGIN" ]
+	then
+		archroot groupadd autologin && \
+		case $DM in
+		lightdm)
+			sudo cp $CONFIG/lightdm-autologin.conf $MOUNT_POINT/etc/lightdm/
+			;;
+		esac
+	fi || return 1
+}
+
+phase_post_config || on_error "post_config"
+
 function copy_files() {
 	if [ -d "$OUTPUT-files" ]
 	then
-		sudo cp -r $OUTPUT-files $MOUNT_POINT/home/$IMG_USER/
-	fi
+		sudo cp -r $OUTPUT-files/*  $MOUNT_POINT/home/$IMG_USER/ && \
+		sudo cp -r $OUTPUT-files/.* $MOUNT_POINT/home/$IMG_USER/
+	fi || return 1
 }
 
 function phase_user() {
 	echo "[build] configure user"
 	archroot locale-gen                                            && \
 	archroot useradd -G $IMG_USER_GROUPS -m -s /bin/bash $IMG_USER && \
-	copy_files
+	copy_files                                                     && \
+	archroot chown -R $IMG_USER:$IMG_USER /home/$IMG_USER
 }
 
 phase_user || on_error "user"
@@ -334,13 +416,13 @@ phase_user || on_error "user"
 
 function phase_custom_commands() {
 	echo "[build] custom commands"
-	echo -n "Voulez-vous exécuter des commandes sur le système ? [Ny] "
+	echo -n "Voulez-vous exécuter des commandes sur le système ? Définir le mot de passe root par exemple [Ny] "
 	read reponse
 	
 	if [ "$reponse" = "Y" -o "$reponse" = "y" ]
 	then
 		archroot bash 
-	fi
+	fi || return 1
 }
 
 phase_custom_commands || on_error "custom_commands"

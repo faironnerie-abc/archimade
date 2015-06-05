@@ -1,0 +1,4 @@
+*.raw-config
+*.raw-files
+*.raw
+make-*.sh
