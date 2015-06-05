@@ -1,0 +1,3 @@
+Server = http://arch.nimukaito.net/$repo/os/$arch
+Server = http://archlinux.mirrors.ovh.net/archlinux/$repo/os/$arch
+Server = http://archlinux.mirror.pkern.at/$repo/os/$arch
